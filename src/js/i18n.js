@@ -30,6 +30,8 @@ const I18N_STRINGS = {
 'nav.home': { en: 'Home', tr: 'Ana sayfa' },
 'nav.about': { en: 'About', tr: 'Hakkında' },
 'nav.toggle_theme': { en: 'Toggle theme', tr: 'Temayı değiştir' },
+'nav.theme_dark': { en: 'DARK', tr: 'KOYU' },
+'nav.theme_light': { en: 'LIGHT', tr: 'AÇIK' },
 'nav.licence': { en: 'Developed under an MIT license.', tr: 'MIT lisansı ile geliştirildi.' },
 'nav.toggle_lang': { en: 'Change language', tr: 'Dili değiştir' },
 'brand.tagline': { en: 'Toolz-AZ', tr: 'Toolz-AZ' },
@@ -112,11 +114,11 @@ const I18N_STRINGS = {
 'compressor.format': { en: 'Format', tr: 'Format' },
 'compressor.quality': { en: 'Quality:', tr: 'Kalite:' },
 'compressor.quality_note': { en: 'Quality slider applies to JPEG and WebP. PNG uses lossless compression.', tr: 'Kalite kaydırıcısı JPEG ve WebP için geçerlidir. PNG sıkıştırması kayıpsızdır.' },
-'compressor.quality_note_png': { en: 'PNG uses lossless compression. Quality settings do not apply.', tr: 'PNG sıkıştırması kayıpsızdır. Kalite ayarları uygulanmaz.' },
+'alt.preview': { en: 'Preview of the uploaded image', tr: 'Yüklenen görselin önizlemesi' },
+
 'compressor.output_preview': { en: 'Output Preview', tr: 'Çıktı Önizlemesi' },
 'compressor.estimated': { en: 'Estimated:', tr: 'Tahmini:' },
 'compressor.generating': { en: 'Generating...', tr: 'Oluşturuluyor...' },
-'compressor.preview_generated': { en: 'Preview generated', tr: 'Önizleme oluşturuldu' },
 'compressor.estimating': { en: 'Estimating...', tr: 'Hesaplanıyor...' },
 'compressor.compress_generate': { en: 'Compress & Generate', tr: 'Sıkıştır ve Oluştur' },
 'compressor.resize_generate': { en: 'Resize & Generate', tr: 'Boyutlandır ve Oluştur' },
@@ -333,6 +335,34 @@ const I18N_STRINGS = {
 'meta.error_read_file': { en: 'Could not read this file.', tr: 'Bu dosya okunamadı.' },
 'conv.error_failed': { en: 'Conversion failed:', tr: 'Dönüştürme başarısız:' },
 'conv.error_unknown': { en: 'Unknown error.', tr: 'Bilinmeyen hata.' },
+'batch.title': { en: 'Batch', tr: 'Toplu İşlem' },
+
+'batch.add_more': { en: 'Add more', tr: 'Daha fazla ekle' },
+'batch.subtitle': { en: 'These settings are applied to every image.', tr: 'Bu ayarlar her görsele uygulanır.' },
+'batch.run_again': { en: 'Run again', tr: 'Tekrar İşle' },
+'batch.run': { en: 'Process all', tr: 'Tümünü İşle' },
+'batch.download_all': { en: 'Download all (ZIP)', tr: 'Tümünü İndir (ZIP)' },
+'batch.packing': { en: 'Packing ZIP...', tr: 'ZIP paketleniyor...' },
+'batch.progress': { en: 'Processing', tr: 'İşleniyor' },
+'batch.done': { en: 'done', tr: 'tamamlandı' },
+'qr.error_no_code': { en: 'No QR code to download. Generate one first.', tr: 'İndirilecek QR kodu yok. Önce bir kod oluşturun.' },
+
+'meta.error_clean_first': { en: 'Clean the photo first.', tr: 'Önce fotoğrafı temizleyin.' },
+
+'status.coming_soon_msg': { en: '{title} is coming soon! Check back later.', tr: '{title} yakında geliyor! Daha sonra tekrar kontrol edin.' },
+
+'batch.cancel': { en: 'Cancel', tr: 'Iptal' },
+
+'batch.summary_cancelled': { en: '{n} skipped', tr: '{n} atlandı' },
+
+'batch.zip_name': { en: 'toolz-az-images-{n}.zip', tr: 'toolz-az-gorseller-{n}.zip' },
+'batch.summary_done': { en: '{n} processed', tr: '{n} işlendi' },
+'batch.summary_failed': { en: '{n} failed', tr: '{n} başarısız' },
+'batch.error_generic': { en: 'This image could not be processed.', tr: 'Bu görsel işlenemedi.' },
+'batch.limit_reached': { en: 'Only the first {n} images are kept in one batch.', tr: 'Tek bir toplu işlemde yalnızca ilk {n} görsel tutulur.' },
+'batch.queued': { en: 'queued', tr: 'beklemede' },
+'batch.files_one': { en: '{n} image', tr: '{n} görsel' },
+'batch.files_other': { en: '{n} images', tr: '{n} görsel' },
 'b64.formats_list': { en: 'JPEG, PNG, GIF, BMP, WebP, AVIF, HEIC, ICO and SVG', tr: 'JPEG, PNG, GIF, BMP, WebP, AVIF, HEIC, ICO ve SVG' },
 'b64.error_read_image': { en: 'Could not read this image. The file may be corrupt or unsupported.', tr: 'Bu görsel okunamadı. Dosya bozuk veya desteklenmiyor olabilir.' },
 
@@ -428,6 +458,17 @@ return 'en';
 
 }
 
+// Subscribers run after every language change. Runtime-composed text (batch
+// progress and summaries, for instance) carries no data-i18n attribute, so
+// i18nApply() cannot rewrite it; these callbacks let the owner do it itself.
+const i18nChangeHandlers = [];
+
+function i18nOnChange(fn) {
+
+if (typeof fn === 'function') i18nChangeHandlers.push(fn);
+
+}
+
 function i18nSetLanguage(code, persist) {
 
 const next = i18nSupported(code) || 'en';
@@ -469,6 +510,20 @@ if (typeof refreshAboutTools === 'function') refreshAboutTools();
 }
 
 i18nSyncSwitchers();
+
+i18nChangeHandlers.forEach((fn) => {
+
+try {
+
+fn(next);
+
+} catch (e) {
+
+// One subscriber failing must not abort the rest.
+
+}
+
+});
 
 return next;
 
@@ -566,6 +621,19 @@ btn.setAttribute('lang', other);
 
 });
 
+// The theme button's label is generated text, not a data-i18n target.
+const theme = document.documentElement.getAttribute('data-theme');
+
+if (theme) {
+
+const tgl = document.getElementById('themeToggle');
+
+const tlabel = tgl && tgl.querySelector('.nav-control-label');
+
+if (tlabel) tlabel.textContent = theme === 'dark' ? t('nav.theme_dark') : t('nav.theme_light');
+
+}
+
 document.querySelectorAll('[data-lang-current]').forEach((el) => {
 
 el.textContent = info.short;
@@ -610,6 +678,7 @@ window.i18nInit = i18nInit;
 window.i18nSetupSwitchers = i18nSetupSwitchers;
 window.i18nApply = i18nApply;
 window.i18nSetLanguage = i18nSetLanguage;
+window.i18nOnChange = i18nOnChange;
 window.t = t;
 window.tf = tf;
 window.I18N_LANGS = I18N_LANGS;

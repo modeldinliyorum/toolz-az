@@ -23,11 +23,22 @@ const toggle = document.getElementById('themeToggle');
 
 if (!toggle) return;
 
-toggle.textContent = theme === 'dark' ? '☀️' : '🌙';
+const isDark = theme === 'dark';
+
+const glyph = toggle.querySelector('.nav-control-glyph');
+
+const label = toggle.querySelector('.nav-control-label');
+
+// The glyph shows the theme you would switch TO, the label names the current
+// one -- so the button states both its own state and its action.
+
+if (glyph) glyph.textContent = isDark ? '☀️' : '🌙';
+
+if (label) label.textContent = isDark ? t('nav.theme_dark') : t('nav.theme_light');
 
 // Expose the state, not just the action
 
-toggle.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+toggle.setAttribute('aria-pressed', isDark ? 'true' : 'false');
 
 }
 
@@ -245,11 +256,40 @@ if (!targetSection) return;
 
 targetSection.classList.add('active');
 
-document.querySelector('.main-content').scrollIntoView({ behavior: 'smooth', block: 'start' });
+// Scroll to the top of the document rather than into the content block: the
+// navbar is sticky, so scrolling the block into view put the heading behind it.
+window.scrollTo({ top: 0, behavior: 'smooth' });
 
 }
 
 // Render tool cards
+
+// Mirror the navbar's real height into the spacer that stands in for it.
+//
+// The navbar is fixed, so it no longer occupies flow space and the page would
+// otherwise start underneath it. It also wraps to two rows on narrow screens, so
+// the offset cannot be a constant: it has to be measured.
+function syncNavbarSpacer() {
+
+const navbar = document.querySelector('.navbar');
+
+const spacer = document.querySelector('.navbar-spacer');
+
+if (!navbar || !spacer) return;
+
+const height = Math.round(navbar.getBoundingClientRect().height);
+
+if (height > 0) {
+
+spacer.style.height = height + 'px';
+
+// Scroll-anchored targets are offset by the same measured height, so a navbar
+// that wraps on narrow screens cannot leave a heading underneath it.
+document.documentElement.style.setProperty('--nav-h', height + 'px');
+
+}
+
+}
 
 function renderTools() {
 
@@ -295,7 +335,7 @@ showSection(tool.id);
 
 } else if (tool.status === 'coming-soon') {
 
-alert(`${tool.title} is coming soon! Check back later.`);
+alert(tf('status.coming_soon_msg', { title: tool.title }));
 
 }
 
@@ -596,32 +636,29 @@ throw err;
 return bgRemovalLibPromise;
 }
 
-function setBgProcessing(active, status, progressPct) {
+function setBgProcessing(active, status) {
 const message = document.getElementById('bgProcessingMessage');
-const track = document.getElementById('bgProgressTrack');
-const bar = document.getElementById('bgProgressBar');
 const statusEl = document.getElementById('bgProcessingStatus');
 const processBtn = document.getElementById('bgProcessBtn');
 
 if (active) {
 message.classList.remove('hidden');
+// Progress is reported as text, not as a bar.
+//
+// The bar was removed on purpose. This library reports every phase through a
+// single progress callback, and only the model download carries a real byte
+// total; inference fires events whose numbers are not a meaningful percentage.
+// Drawing those as a fill level produced a figure that moved without meaning
+// anything. A bar is also wrong for the common case, because after the first
+// run the model is cached, there is no fetch to report, and the bar would sit
+// empty through the whole of the work it appeared to be measuring.
 if (statusEl) statusEl.textContent = status || '';
-if (track) {
-if (typeof progressPct === 'number') {
-track.classList.remove('hidden');
-if (bar) bar.style.width = Math.min(100, Math.max(0, progressPct)) + '%';
-} else {
-track.classList.add('hidden');
-}
-}
 if (processBtn) processBtn.disabled = true;
 } else {
 message.classList.add('hidden');
 // Clear the status text too: it stayed visible in the DOM after the run and
 // reappeared with stale wording ("Downloading model...") on the next attempt.
 if (statusEl) statusEl.textContent = '';
-if (track) track.classList.add('hidden');
-if (bar) bar.style.width = '0%';
 if (processBtn) processBtn.disabled = false;
 }
 }
@@ -683,9 +720,26 @@ const blob = await mod.removeBackground(bgCurrentFile, {
 model: model,
 output: { format: 'image/png', type: 'foreground' },
 progress: (key, current, total) => {
-if (total > 0) {
-setBgProcessing(true, t('bgrem.downloading_model_of') + model + ')...', Math.round((current / total) * 100));
+
+// Only the network fetch phase carries a real byte total. Inference also fires
+// events whose current/total are not a meaningful percentage, so rendering those
+// as a download bar produced a figure that jumped around and never meant
+// anything. Non-fetch phases are left to the spinner.
+const isFetch = typeof key === 'string' && key.startsWith('fetch');
+
+if (isFetch && total > 0) {
+
+// Real byte progress, shown as a number because that is what it actually is.
+const pct = Math.round((current / total) * 100);
+
+setBgProcessing(true, t('bgrem.downloading_model_of') + model + ')... ' + pct + '%');
+
+} else if (!isFetch) {
+
+setBgProcessing(true, t('bgrem.processing'));
+
 }
+
 }
 });
 
@@ -817,6 +871,12 @@ return (bytes / 1048576).toFixed(1) + ' MB';
 
 }
 
+// Set by the compressor's file handlers. True when the selection covers more
+// than one file, in which case the preview image must not overwrite the
+// dimension inputs: in a batch those inputs drive every file, not just the one
+// shown in the preview.
+let batchSelectedMultiple = false;
+
 function loadImage(file) {
 
 if (!file || !file.type.startsWith('image/')) {
@@ -857,11 +917,17 @@ document.getElementById('previewSize').textContent = formatFileSize(file.size);
 
 document.getElementById('previewDims').textContent = `${img.width} × ${img.height}`;
 
-// Set input values to original dimensions
+// Adopt the image's own dimensions only when this is genuinely a single-image
+// edit. When several files were picked, or the tool already holds a batch,
+// resetting here silently discarded the size the user had already chosen, and
+// the batch then ran with the wrong value.
+if (!batchSelectedMultiple) {
 
 document.getElementById('widthInput').value = img.width;
 
 document.getElementById('heightInput').value = img.height;
+
+}
 
 // Show preview and controls, hide upload area
 
@@ -1215,6 +1281,11 @@ browseBtn.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', (e) => {
 
+// More than one file means a batch. The preview then shows only the first
+// file, and adopting that file's dimensions would throw away the size the user
+// had already chosen for the whole set.
+batchSelectedMultiple = e.target.files.length > 1 || batchIsActive('compress');
+
 if (e.target.files[0]) loadImage(e.target.files[0]);
 
 });
@@ -1242,6 +1313,8 @@ e.preventDefault();
 uploadArea.classList.remove('drag-over');
 
 const file = e.dataTransfer.files[0];
+
+batchSelectedMultiple = e.dataTransfer.files.length > 1 || batchIsActive('compress');
 
 if (file && file.type.startsWith('image/')) loadImage(file);
 
@@ -1325,6 +1398,10 @@ let qrMatrix = null;
 
 let qrModuleCount = 0;
 
+// The library's margin-less render, kept so the quiet zone can be composed
+// identically for the on-screen preview and for the downloaded file.
+let qrRawElement = null;
+
 function generateQRCode(text, container, size, qrColor, bgColor, margin) {
 
 try {
@@ -1379,7 +1456,12 @@ qrMatrix.push(row);
 
 }
 
-return container.querySelector('img, canvas, svg') ? true : false;
+// Keep the library's own output. qrcodejs 1.0.0 ignores the `margin` option,
+// so this element has NO quiet zone and is the raw source for both the preview
+// composition and the download.
+qrRawElement = container.querySelector('img, canvas, svg') || null;
+
+return qrRawElement ? true : false;
 
 } catch (err) {
 
@@ -1392,6 +1474,54 @@ qrModuleCount = 0;
 return false;
 
 }
+
+}
+
+// Compose the quiet zone around the code.
+//
+// qrcodejs renders the modules edge-to-edge: its `margin` option is not
+// implemented in 1.0.0. The download path already built its own padding, so the
+// preview looked different from the file -- the margin was invisible on screen
+// even though it was present in the export. Both paths now call this, so what
+// you see is what you get.
+function qrQuietPad(sourceWidth, quietModules) {
+
+const moduleSize = qrModuleCount ? sourceWidth / qrModuleCount : 0;
+
+return moduleSize > 0
+? Math.round(moduleSize * quietModules)
+: Math.round(sourceWidth * 0.04);
+
+}
+
+function composeQrWithMargin(sourceEl, bgColor, quietModules) {
+
+const requested = parseInt(qrSize.value, 10) || 256;
+
+const w = sourceEl.naturalWidth || sourceEl.width || requested;
+
+const h = sourceEl.naturalHeight || sourceEl.height || requested;
+
+const pad = qrQuietPad(w, quietModules);
+
+const out = document.createElement('canvas');
+
+out.width = w + pad * 2;
+
+out.height = h + pad * 2;
+
+const ctx = out.getContext('2d');
+
+ctx.fillStyle = bgColor;
+
+ctx.fillRect(0, 0, out.width, out.height);
+
+// Keep module edges crisp; smoothing would blur the finder patterns.
+ctx.imageSmoothingEnabled = false;
+
+ctx.drawImage(sourceEl, 0, 0, w, h, pad, pad, w, h);
+
+return out;
 
 }
 
@@ -1591,7 +1721,12 @@ qrMargin.addEventListener('change', () => {
 
 qrContainerWrapper.setAttribute('data-margin', qrMargin.value);
 
+refreshQrIfGenerated();
+
 });
+
+// Redraw at the new size instead of waiting for another Generate click.
+qrSize.addEventListener('change', refreshQrIfGenerated);
 
 qrContainerWrapper.setAttribute('data-margin', qrMargin.value);
 
@@ -1600,6 +1735,10 @@ qrColor.addEventListener('input', () => {
 qrColorInput.value = qrColor.value;
 
 qrColorInput.classList.remove('invalid');
+
+refreshContrastWarning();
+
+refreshQrIfGenerated();
 
 });
 
@@ -1617,6 +1756,11 @@ qrColorInput.value = normalized;
 
 qrColorInput.classList.remove('invalid');
 
+// Redraw only while the value is valid, so a half-typed hex never renders.
+refreshContrastWarning();
+
+refreshQrIfGenerated();
+
 } else if (hex.length > 0) {
 
 qrColorInput.classList.add('invalid');
@@ -1630,6 +1774,10 @@ qrBgColor.addEventListener('input', () => {
 qrBgColorInput.value = qrBgColor.value;
 
 qrBgColorInput.classList.remove('invalid');
+
+refreshContrastWarning();
+
+refreshQrIfGenerated();
 
 });
 
@@ -1646,6 +1794,11 @@ qrBgColor.value = normalized;
 qrBgColorInput.value = normalized;
 
 qrBgColorInput.classList.remove('invalid');
+
+// Redraw only while the value is valid, so a half-typed hex never renders.
+refreshContrastWarning();
+
+refreshQrIfGenerated();
 
 } else if (hex.length > 0) {
 
@@ -1669,7 +1822,80 @@ qrBgColor.addEventListener('input', refreshContrastWarning);
 
 refreshContrastWarning();
 
-qrGenerateBtn.addEventListener('click', () => {
+// Animate the QR canvas from its previous on-screen size to the new one.
+//
+// The canvas is a different element on every redraw, so a plain CSS transition
+// has nothing to attach to. Animating explicitly from the measured old size to
+// the new one is what makes a margin change read as a smooth grow or shrink.
+// Holds the in-flight resize so a rapid second change can take over from
+// exactly where the first one had reached, instead of restarting from the
+// previous settled size and stuttering.
+let qrResizeAnimation = null;
+
+function animateQrResize(canvas, fromRect) {
+
+if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+if (typeof canvas.animate !== 'function') return;
+
+const to = canvas.getBoundingClientRect();
+
+if (!to.width || !to.height || !fromRect.width || !fromRect.height) return;
+
+// Nothing actually changed, so there is nothing to animate. Running a tween to
+// the size it already has produces a visible flicker on a no-op.
+const moved = Math.abs(to.width - fromRect.width) > 0.5 || Math.abs(to.height - fromRect.height) > 0.5;
+
+if (!moved) return;
+
+// A change that lands mid-flight continues from the current interpolated size
+// rather than snapping back to where the previous tween began.
+if (qrResizeAnimation) {
+
+qrResizeAnimation.cancel();
+
+qrResizeAnimation = null;
+
+}
+
+const frames = [
+{ width: fromRect.width + 'px', height: fromRect.height + 'px', opacity: 0.72 },
+{ width: to.width + 'px', height: to.height + 'px', opacity: 1 }
+];
+
+const anim = canvas.animate(frames, {
+
+duration: 420,
+
+// Decelerating curve with almost no initial movement: the size change eases
+// out rather than snapping, which is what reads as smooth at this duration.
+easing: 'cubic-bezier(.16, 1, .3, 1)',
+
+fill: 'none'
+
+});
+
+qrResizeAnimation = anim;
+
+if (anim.finished && anim.finished.catch) {
+
+anim.finished.then(() => {
+
+if (qrResizeAnimation === anim) qrResizeAnimation = null;
+
+}).catch(() => {});
+
+}
+
+}
+
+
+// Renders the QR from the current field values. Shared by the Generate button
+// and by the live update on size/margin/colour change, so those controls never
+// require a second click.
+function renderQrNow() {
+
+
 
 const text = qrInput.value.trim();
 
@@ -1693,6 +1919,27 @@ const ok = generateQRCode(text, qrContainer, qrSize.value, qrColor.value, qrBgCo
 
 if (ok) {
 
+// Replace the raw render with the composed one so the on-screen quiet zone is
+// visible and identical to the exported file.
+const composed = composeQrWithMargin(qrRawElement, qrBgColor.value, Math.max(2, parseInt(qrMargin.value, 10) || 4));
+
+// Remember the on-screen size so a re-render (margin/size/colour change) can
+// grow into it instead of snapping.
+const previous = qrContainer.querySelector('canvas, img');
+
+const previousRect = previous ? previous.getBoundingClientRect() : null;
+
+qrContainer.innerHTML = '';
+
+qrContainer.appendChild(composed);
+
+if (previousRect && previousRect.width > 0) {
+
+animateQrResize(composed, previousRect);
+
+}
+
+
 qrPreview.classList.remove('hidden');
 
 qrDownloadSection.classList.remove('hidden');
@@ -1705,7 +1952,26 @@ alert(t('qr.error_failed'));
 
 }
 
-});
+
+
+}
+
+qrGenerateBtn.addEventListener('click', renderQrNow);
+
+// Once a code exists, changing size, margin or a colour should just redraw it.
+// Before that there is nothing to redraw, so the button still does the work.
+function refreshQrIfGenerated() {
+
+if (!qrGenerated) return;
+
+const text = qrInput.value.trim();
+
+if (!text) return;
+
+renderQrNow();
+
+}
+
 
 qrClearBtn.addEventListener('click', () => {
 
@@ -1727,6 +1993,8 @@ qrModuleCount = 0;
 
 qrGenerated = false;
 
+qrRawElement = null;
+
 });
 
 qrDownloadBtn.addEventListener('click', () => {
@@ -1745,7 +2013,7 @@ const svg = buildQRSvg(dark, bg, quiet);
 
 if (!svg) {
 
-alert('No QR code to download. Generate one first.');
+alert(t('qr.error_no_code'));
 
 return;
 
@@ -1757,11 +2025,13 @@ return;
 
 }
 
-const element = qrContainer.querySelector('canvas, img, svg');
+// Use the library's raw render: qrContainer now holds the composed preview,
+// which already carries the quiet zone. Reading it here would add a second one.
+const element = qrRawElement || qrContainer.querySelector('canvas, img, svg');
 
 if (!element) {
 
-alert('No QR code to download. Generate one first.');
+alert(t('qr.error_no_code'));
 
 return;
 
@@ -1787,9 +2057,7 @@ sctx.drawImage(element, 0, 0, source.width, source.height);
 // canvas to the QR and then drew at (padding, padding), pushing the right and
 // bottom edges outside the canvas and silently cropping them.
 
-const moduleSize = qrModuleCount ? source.width / qrModuleCount : 0;
-
-const pad = moduleSize > 0 ? Math.round(moduleSize * quiet) : Math.round(source.width * 0.04);
+const pad = qrQuietPad(source.width, quiet);
 
 const out = document.createElement('canvas');
 
@@ -1999,6 +2267,10 @@ const resizeScaleSlider = document.getElementById('resizeScaleSlider');
 
 const resizeScaleValue = document.getElementById('resizeScaleValue');
 
+// True when the resizer is handling more than one file; see the compressor's
+// equivalent note for why the source dimensions must not overwrite the inputs.
+let resizeBatchSelected = false;
+
 function loadResizeImage(file) {
 
 if (!file || !file.type || !file.type.startsWith('image/')) {
@@ -2037,6 +2309,13 @@ resizePreviewSize.textContent = formatFileSize(file.size);
 
 resizePreviewDims.textContent = `${resizeOriginalWidth} × ${resizeOriginalHeight}`;
 
+// Only adopt the source dimensions for a genuine single-image edit. With a
+// batch queued, or several files picked at once, resetting here discards the
+// target size the user already chose, and the batch then resizes every file to
+// the first file's size instead.
+
+if (!resizeBatchSelected) {
+
 resizeWidthInput.value = resizeOriginalWidth;
 
 resizeHeightInput.value = resizeOriginalHeight;
@@ -2044,6 +2323,8 @@ resizeHeightInput.value = resizeOriginalHeight;
 resizeScaleSlider.value = 100;
 
 resizeScaleValue.textContent = 100;
+
+}
 
 resizeOriginalFilename = file.name;
 
@@ -2075,6 +2356,8 @@ img.src = objectUrl;
 resizeBrowseBtn.addEventListener('click', () => resizeFileInput.click());
 
 resizeFileInput.addEventListener('change', (e) => {
+
+resizeBatchSelected = e.target.files.length > 1 || batchIsActive('resize');
 
 if (e.target.files[0]) loadResizeImage(e.target.files[0]);
 
@@ -2407,7 +2690,7 @@ alert(t('resizer.error_generate'));
 
 } finally {
 
-btn.textContent = 'Generate';
+btn.textContent = t('resizer.generate');
 
 btn.disabled = false;
 
@@ -3168,7 +3451,7 @@ const searchInput = document.getElementById('searchInput');
 
 if (scaled && !(searchInput && searchInput.value.trim())) {
 
-infoText.textContent += ` (analysed at ${width}×${height} for performance)`;
+infoText.textContent += ' (' + t('palette.analysed_at') + ' ' + width + '×' + height + ' ' + t('palette.for_performance') + ')';
 
 }
 
@@ -3225,6 +3508,13 @@ analyzeImage(img);
 document.getElementById('paletteImagePreview').classList.remove('hidden');
 
 document.getElementById('paletteResults').classList.remove('hidden');
+
+// The controls and swatch grid sit in their own card, which is meaningless
+// without an image to act on: it showed an empty mode selector and a blank
+// grid. It is revealed together with the preview and hidden again on clear.
+const palettePanel = document.querySelector('.palette-preview-container');
+
+if (palettePanel) palettePanel.classList.remove('hidden');
 
 document.getElementById('paletteUploadArea').classList.add('hidden');
 
@@ -3285,6 +3575,10 @@ document.getElementById('palettePreviewImage').src = '';
 document.getElementById('paletteImagePreview').classList.add('hidden');
 
 document.getElementById('paletteResults').classList.add('hidden');
+
+const palettePanel = document.querySelector('.palette-preview-container');
+
+if (palettePanel) palettePanel.classList.add('hidden');
 
 document.getElementById('paletteUploadArea').classList.remove('hidden');
 
@@ -3432,7 +3726,7 @@ await navigator.clipboard.writeText(paletteText);
 
 const originalText = copyPaletteBtn.textContent;
 
-copyPaletteBtn.textContent = 'Copied!';
+copyPaletteBtn.textContent = t('btn.copied');
 
 copyPaletteBtn.classList.add('copied');
 
@@ -4133,11 +4427,11 @@ document.getElementById('b64OutputText').value = wrapToggle.checked
 copyBtn.addEventListener('click', () => {
 
 // Copy the unwrapped payload; wrapping is only for display.
-b64Copy(b64EncodedString, copyBtn, 'Copied!');
+b64Copy(b64EncodedString, copyBtn, t('btn.copied'));
 
 });
 
-copyDataUriBtn.addEventListener('click', () => b64Copy(b64DataUriString, copyDataUriBtn, 'Copied!'));
+copyDataUriBtn.addEventListener('click', () => b64Copy(b64DataUriString, copyDataUriBtn, t('btn.copied')));
 
 downloadTxtBtn.addEventListener('click', () => {
 
@@ -4935,7 +5229,7 @@ const kind = document.createElement('span');
 
 kind.className = 'meta-kind';
 
-kind.textContent = 'clean';
+kind.textContent = t('status.clean');
 
 const name = document.createElement('span');
 
@@ -5296,7 +5590,7 @@ downloadBtn.addEventListener('click', () => {
 
 if (!metaOutputBlob) {
 
-alert('Clean the photo first.');
+alert(t('meta.error_clean_first'));
 
 return;
 
@@ -5859,7 +6153,417 @@ content.prepend(note);
 
 }
 
+
+// ---------------------------------------------------------------------------
+// Batch processing
+//
+// Each adapter processes exactly ONE file and returns { blob, filename }.
+// They read the tool's current settings from the DOM at call time, so changing
+// quality or format applies to the whole batch, but they never write to the
+// single-image tool state -- that would make the single preview flicker and
+// lose the user's image while a batch is running.
+// ---------------------------------------------------------------------------
+
+// Map an output MIME type to a file extension.
+function batchExtFor(mime, fallback) {
+
+const map = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/avif': 'avif' };
+
+return map[mime] || fallback || 'png';
+
+}
+
+// --- Image Compressor ------------------------------------------------------
+
+async function batchCompressFile(file) {
+
+const handle = await decodeImageFile(file);
+
+try {
+
+const img = handle.img;
+
+const ratio = img.width && img.height ? img.width / img.height : 1;
+
+let width = parseInt(document.getElementById('widthInput').value, 10);
+
+let height = parseInt(document.getElementById('heightInput').value, 10);
+
+if (!Number.isFinite(width) || width < 1) width = img.width;
+
+if (!Number.isFinite(height) || height < 1) height = img.height;
+
+// The aspect lock is relative to THIS file, so a batch of mixed sizes keeps
+// every image's own proportions.
+if (document.getElementById('aspectRatioLock').checked) {
+
+height = Math.round(width / ratio);
+
+}
+
+width = Math.min(Math.round(width), MAX_DIMENSION);
+
+height = Math.min(Math.round(height), MAX_DIMENSION);
+
+if (width * height > MAX_PIXELS) {
+
+const shrink = Math.sqrt(MAX_PIXELS / (width * height));
+
+width = Math.max(1, Math.floor(width * shrink));
+
+height = Math.max(1, Math.floor(height * shrink));
+
+}
+
+const format = document.getElementById('formatSelect').value;
+
+const quality = parseInt(document.getElementById('qualitySlider').value, 10) / 100;
+
+const canvas = document.createElement('canvas');
+
+canvas.width = width;
+
+canvas.height = height;
+
+drawSourceOntoCanvas(canvas.getContext('2d'), img, width, height, format);
+
+const blob = await new Promise((resolve, reject) => {
+
+canvas.toBlob((b) => b ? resolve(b) : reject(new Error(t('compressor.error_generate'))), format, quality);
+
+});
+
+return { blob, filename: safeBaseName(file.name, 'image') + '-compressed.' + batchExtFor(blob.type, batchExtFor(format)) };
+
+} finally {
+
+releaseImage(handle);
+
+}
+
+}
+
+// --- Image Resizer ---------------------------------------------------------
+
+async function batchResizeFile(file) {
+
+const handle = await decodeImageFile(file);
+
+try {
+
+const img = handle.img;
+
+const type = file.type || 'image/png';
+
+// The width field is the target width, and every file in the batch is resized
+// to it -- that is what setting a width and expecting the whole queue to follow
+// means. Each image then keeps its own proportions, because forcing one exact
+// width/height box onto files with different shapes would distort all but the
+// first. An unlocked height is honoured as given, since that is an explicit
+// choice. With no usable width the scale slider is the fallback.
+const widthField = parseFloat(document.getElementById('resizeWidthInput').value);
+
+const heightField = parseFloat(document.getElementById('resizeHeightInput').value);
+
+const lockEl = document.getElementById('resizeAspectRatioLock');
+
+const locked = lockEl ? lockEl.checked : true;
+
+const scale = parseFloat(document.getElementById('resizeScaleSlider').value) || 100;
+
+let width;
+
+let height;
+
+if (widthField > 0) {
+
+width = Math.round(widthField);
+
+height = (!locked && heightField > 0)
+? Math.round(heightField)
+: Math.max(1, Math.round(img.height * (width / img.width)));
+
+} else {
+
+width = Math.round(img.width * (scale / 100));
+
+height = Math.round(img.height * (scale / 100));
+
+}
+
+const final = clampResizeDimensions(width, height);
+
+const lossy = (type === 'image/jpeg' || type === 'image/webp');
+
+const canvas = document.createElement('canvas');
+
+canvas.width = final.width;
+
+canvas.height = final.height;
+
+const ctx = canvas.getContext('2d');
+
+if (type === 'image/jpeg') {
+
+ctx.fillStyle = '#ffffff';
+
+ctx.fillRect(0, 0, final.width, final.height);
+
+}
+
+ctx.drawImage(img, 0, 0, final.width, final.height);
+
+const blob = await new Promise((resolve, reject) => {
+
+canvas.toBlob((b) => b ? resolve(b) : reject(new Error(t('resizer.error_generate'))), type, lossy ? RESIZE_QUALITY : undefined);
+
+});
+
+return { blob, filename: safeBaseName(file.name, 'image') + '-resized.' + (RESIZE_EXT[blob.type] || 'png') };
+
+} finally {
+
+releaseImage(handle);
+
+}
+
+}
+
+// --- Image Converter -------------------------------------------------------
+
+async function batchConvertFile(file) {
+
+const handle = await decodeImageFile(file);
+
+try {
+
+const img = handle.img;
+
+const mime = document.getElementById('convFormatSelect').value;
+
+const fmt = CONV_FORMATS[mime];
+
+if (!fmt) throw new Error(t('conv.error_unsupported'));
+
+const quality = parseInt(document.getElementById('convQualitySlider').value, 10) || 80;
+
+const canvas = document.createElement('canvas');
+
+canvas.width = img.naturalWidth || img.width;
+
+canvas.height = img.naturalHeight || img.height;
+
+const ctx = canvas.getContext('2d');
+
+if (mime === 'image/jpeg') {
+
+ctx.fillStyle = '#ffffff';
+
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+}
+
+ctx.drawImage(img, 0, 0);
+
+let blob;
+
+if (mime === 'image/bmp') {
+
+blob = encodeBMP(ctx.getImageData(0, 0, canvas.width, canvas.height));
+
+} else if (mime === 'image/gif') {
+
+blob = await encodeGIF(canvas, ctx.getImageData(0, 0, canvas.width, canvas.height));
+
+} else if (mime === 'image/avif') {
+
+blob = await encodeAVIF(ctx.getImageData(0, 0, canvas.width, canvas.height), quality);
+
+} else {
+
+blob = await canvasToBlobPromise(canvas, mime, mime === 'image/png' ? undefined : (quality / 100));
+
+}
+
+if (!blob) throw new Error(t('conv.error_failed'));
+
+return { blob, filename: safeBaseName(file.name, 'image') + '-converted.' + fmt.ext };
+
+} finally {
+
+releaseImage(handle);
+
+}
+
+}
+
+// --- Metadata Cleaner ------------------------------------------------------
+
+async function batchCleanMetaFile(file) {
+
+const buffer = await file.arrayBuffer();
+
+const bytes = new Uint8Array(buffer);
+
+const type = file.type;
+
+const orientation = type === 'image/jpeg' ? metaReadJpegOrientation(bytes) : 1;
+
+// A rotated photo must have its rotation baked into the pixels, which requires
+// a decoded image and therefore a re-encode. Everything else is lossless.
+if (orientation > 1) {
+
+const handle = await decodeImageFile(file);
+
+try {
+
+const canvas = metaFlattenOrientation(handle.img);
+
+const blob = await new Promise((resolve, reject) => {
+
+canvas.toBlob((b) => b ? resolve(b) : reject(new Error(t('meta.error_reencode'))), 'image/jpeg', 0.95);
+
+});
+
+return { blob, filename: safeBaseName(file.name, 'photo') + '-clean.jpg' };
+
+} finally {
+
+releaseImage(handle);
+
+}
+
+}
+
+const result = metaStrip(bytes, type);
+
+if (!result) throw new Error(t('meta.error_format'));
+
+const ext = batchExtFor(type, 'png');
+
+return { blob: new Blob([result.bytes], { type }), filename: safeBaseName(file.name, 'photo') + '-clean.' + ext };
+
+}
+
+// --- Background Remover ----------------------------------------------------
+
+async function batchRemoveBgFile(file) {
+
+const mod = await loadBgRemovalLib();
+
+const model = (BG_MODELS[bgModelChoice] || BG_MODELS.balanced).id;
+
+const blob = await mod.removeBackground(file, {
+
+model,
+
+output: { format: 'image/png', type: 'foreground' }
+
+});
+
+if (!blob) throw new Error(t('bgrem.error_failed'));
+
+return { blob, filename: safeBaseName(file.name, 'image') + '-no-bg.png' };
+
+}
+
+// Wire the batch queue into the tools that support it. Each entry only needs to
+// name the DOM ids and supply a per-file processor.
+function setupBatchProcessing() {
+
+const common = {
+
+onLimit: (n) => console.warn('Batch limited to ' + n + ' files'),
+
+onEmpty: () => {}
+
+};
+
+setupBatchTool(Object.assign({
+
+idPrefix: 'compress',
+
+primaryBtnId: 'generateBtn',
+
+inputId: 'fileInput',
+
+anchorId: 'uploadArea',
+
+uploadAreaId: 'uploadArea',
+
+processFile: batchCompressFile
+
+}, common));
+
+setupBatchTool(Object.assign({
+
+idPrefix: 'resize',
+
+primaryBtnId: 'resizeGenerateBtn',
+
+inputId: 'resizeFileInput',
+
+anchorId: 'resizeUploadArea',
+
+uploadAreaId: 'resizeUploadArea',
+
+processFile: batchResizeFile
+
+}, common));
+
+setupBatchTool(Object.assign({
+
+idPrefix: 'bg',
+
+primaryBtnId: 'bgProcessBtn',
+
+inputId: 'bgFileInput',
+
+anchorId: 'bgUploadArea',
+
+uploadAreaId: 'bgUploadArea',
+
+processFile: batchRemoveBgFile
+
+}, common));
+
+setupBatchTool(Object.assign({
+
+idPrefix: 'conv',
+
+primaryBtnId: 'convConvertBtn',
+
+inputId: 'convFileInput',
+
+anchorId: 'convUploadArea',
+
+uploadAreaId: 'convUploadArea',
+
+processFile: batchConvertFile
+
+}, common));
+
+setupBatchTool(Object.assign({
+
+idPrefix: 'meta',
+
+primaryBtnId: 'metaCleanBtn',
+
+inputId: 'metaFileInput',
+
+anchorId: 'metaUploadArea',
+
+uploadAreaId: 'metaUploadArea',
+
+processFile: batchCleanMetaFile
+
+}, common));
+
+}
+
 // Initialize
+
+syncNavbarSpacer();
 
 document.addEventListener('DOMContentLoaded', () => {
 
@@ -5891,6 +6595,8 @@ setupFileConverter();
 setupMetadataCleaner();
 
 setupBase64Converter();
+
+setupBatchProcessing();
 
 // The QR library is only needed if the user actually opens that tool
 
@@ -5932,3 +6638,14 @@ if (document.getElementById('qr-generator').classList.contains('active')) ensure
 }
 
 });
+
+
+window.addEventListener('resize', syncNavbarSpacer, { passive: true });
+
+// The navbar height can change after late-loading webfonts settle.
+
+if (document.fonts && document.fonts.ready) {
+
+document.fonts.ready.then(syncNavbarSpacer);
+
+}
